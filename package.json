@@ -1,0 +1,60 @@
+{
+    "name": "@blax-software/i18n",
+    "version": "0.1.0",
+    "description": "Per-page, all-locale translation sources merged into vue-i18n messages, plus a CLI that builds one bundle per locale and fails CI on missing keys.",
+    "type": "module",
+    "main": "./dist/index.cjs",
+    "module": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js",
+            "require": "./dist/index.cjs"
+        },
+        "./node": {
+            "types": "./dist/node.d.ts",
+            "import": "./dist/node.js",
+            "require": "./dist/node.cjs"
+        }
+    },
+    "bin": {
+        "blax-i18n": "./dist/cli.js"
+    },
+    "files": [
+        "dist",
+        "AGENTS.md"
+    ],
+    "engines": {
+        "node": ">=18.17"
+    },
+    "scripts": {
+        "build": "tsup",
+        "dev": "tsup --watch",
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run",
+        "prepublishOnly": "npm run build && npm run typecheck && npm test"
+    },
+    "dependencies": {
+        "esbuild": "^0.27.0"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "tsup": "^8.0.0",
+        "typescript": "^5.5.0",
+        "vitest": "^3.0.0"
+    },
+    "keywords": [
+        "i18n",
+        "vue-i18n",
+        "nuxt",
+        "translations",
+        "locales",
+        "cli"
+    ],
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/blax-software/npm-i18n.git"
+    }
+}
