@@ -45,7 +45,7 @@ import {
 | --- | --- |
 | `TranslationMissing` | The string `'[missing]'`. Put it where a translation is still open; `blax-i18n check` reports every occurrence. |
 | `TranslationFile` | `{ [locale: string]: Record<string, any> }` — the page-module shape. Use `satisfies TranslationFile`. |
-| `mergeMessages(locales, pages)` | `{ [locale]: messages }` — seed from `locales`, deep-merge each page's `[locale]` slice in order. Inputs are not mutated. Only locales present in `locales` are emitted. |
+| `mergeMessages(locales, pages, { packages? })` | `{ [locale]: messages }` — seed from `locales`, deep-merge each page's `[locale]` slice in order. Inputs are not mutated. Only locales present in `locales` are emitted. `packages` (page-shaped objects) merge first, so the app overrides them. |
 | `fallbackChain(locales, defaultLocale = 'en')` | vue-i18n `fallbackLocale` map: `{ de: ['en'], pl: ['en'], default: ['en'] }`. |
 | `createLazyLoaders(loaders)` | `{ loadLocaleMessages(locale), hasLocaleBundle(locale) }` over static `import()` calls of the built bundles. |
 | `checkTranslations(sources, { locales, reference? })` | The check logic on already-loaded data (what the CLI runs). `formatReport(report)` renders it. |
@@ -110,12 +110,15 @@ export default {
 ## CLI (`blax-i18n`)
 
 ```
-blax-i18n build [--src i18n] [--out <src>/.messages] [--locales en,de,pl] [--default en]
-blax-i18n check [--src i18n] [--locales en,de,pl] [--default en] [--json]
+blax-i18n build [--src i18n] [--out <src>/.messages] [--locales en,de,pl] [--default en] [--packages auto|a,b]
+blax-i18n check [--src i18n] [--locales en,de,pl] [--default en] [--packages auto|a,b] [--json]
 ```
 
 - `build` writes `<out>/<locale>.js`, one `export default {...}` ESM module per locale.
-  Sources are transpiled with esbuild, so `.ts` files need no bundler. `--default` is always emitted.
+  Sources are transpiled with esbuild, so `.ts` files need no bundler. `--default` is always
+  emitted, on top of `--locales` or of every base file when `--locales` is omitted.
+- `--packages` merges translations that npm packages register (see below). `auto` takes
+  every dependency in the app's package.json that registers some; a comma list names them.
 - `check` walks every key across the listed locales and reports, per locale, keys that
   are missing and values that still hold `[missing]`. Exit code 1 when anything is
   missing; `--json` prints the report object. Without `--default` the reference key set
@@ -146,11 +149,45 @@ Translation files are loaded as pure data: relative imports between them resolve
 `import { TranslationMissing } from '@blax-software/i18n'` resolves, any other import
 yields `{}`.
 
+## Translations shipped by packages
+
+A library that shows text of its own (a connection toast, a validation error) can ship
+those strings instead of making every app redefine them. It points a `blax-i18n` field in
+its package.json at a page-shaped module:
+
+```json
+{
+  "name": "@blax-software/networking",
+  "blax-i18n": "./dist/i18n.js",
+  "exports": { "./i18n": { "import": "./dist/i18n.js", "require": "./dist/i18n.cjs" } }
+}
+```
+
+```ts
+// src/i18n.ts in the library
+export default {
+  en: { websocket: { connectionlost: 'Connection lost. Reconnecting…' } },
+  de: { websocket: { connectionlost: 'Verbindung unterbrochen. Verbinde neu…' } },
+}
+```
+
+The app opts in with `--packages auto` (or `packages: 'auto'` in the Node API). Package
+strings merge first, so any base file or page can override one. `check` then also verifies
+every package key in every checked locale, and accepts a locale the package lacks when the
+app supplies it. Apps that merge at runtime import the module themselves:
+
+```ts
+import networking from '@blax-software/networking/i18n'
+export default mergeMessages(locales, pages, { packages: [networking] })
+```
+
+Keep keys under one namespace per package (`websocket.*`) so they cannot collide with app keys.
+
 ## Node API (`@blax-software/i18n/node`)
 
-`readSourceTree`, `buildMessages`, `writeMessages`, `checkSourceTree` and `loadModule`
-are what the CLI calls; use them from a build script (for example a Nuxt hook that
-regenerates bundles on change).
+`readSourceTree`, `buildMessages`, `writeMessages`, `checkSourceTree`, `readPackageSources`
+and `loadModule` are what the CLI calls; use them from a build script (for example a Nuxt
+hook that regenerates bundles on change). Every one of them takes `packages` and `root`.
 
 ## Development
 

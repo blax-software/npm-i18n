@@ -30,19 +30,44 @@ export function deepMerge(target: Messages, source: Messages): Messages {
   return target
 }
 
+export interface MergeOptions {
+  /**
+   * Translations shipped by npm packages (same shape as a page module). They
+   * merge FIRST, under the app's base files and pages, so a package supplies
+   * defaults and the app can override any of its strings.
+   */
+  packages?: TranslationFile[]
+}
+
 /**
  * Build `{ [locale]: messages }`: seed every locale from `locales`, then
  * deep-merge each page module's `[locale]` slice in the order given (last
  * wins). The set of locales is exactly `Object.keys(locales)` — a locale that
  * appears only in a page is ignored. Inputs are not mutated.
  *
+ * With `options.packages`, each package's `[locale]` slice is merged before the
+ * base files, so app strings win over package strings.
+ *
  * Feed it `import.meta.glob` results (sorted by path for a stable order) and
  * hand the result to vue-i18n as `messages`.
  */
-export function mergeMessages(locales: Record<string, Messages>, pages: TranslationFile[]): LocaleMessages {
+export function mergeMessages(
+  locales: Record<string, Messages>,
+  pages: TranslationFile[],
+  options: MergeOptions = {},
+): LocaleMessages {
+  const packages = (options.packages ?? []).filter(isPlainObject)
   const payload: LocaleMessages = {}
   for (const lang of Object.keys(locales)) {
-    payload[lang] = clone(locales[lang] ?? {})
+    if (!packages.length) {
+      payload[lang] = clone(locales[lang] ?? {})
+      continue
+    }
+    payload[lang] = {}
+    for (const pkg of packages) {
+      if (isPlainObject(pkg[lang])) deepMerge(payload[lang], pkg[lang])
+    }
+    deepMerge(payload[lang], locales[lang] ?? {})
   }
   for (const page of pages) {
     if (!isPlainObject(page)) continue

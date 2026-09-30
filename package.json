@@ -1,6 +1,6 @@
 {
     "name": "@blax-software/i18n",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "Per-page, all-locale translation sources merged into vue-i18n messages, plus a CLI that builds one bundle per locale and fails CI on missing keys.",
     "type": "module",
     "main": "./dist/index.cjs",

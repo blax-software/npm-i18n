@@ -60,6 +60,34 @@ describe('mergeMessages', () => {
     for (const page of pages) for (const lang of Object.keys(payload)) refMerge(payload[lang], (page as any)[lang] ?? {})
     expect(JSON.stringify(mergeMessages(locales, pages))).toBe(JSON.stringify(payload))
   })
+
+  it('merges package translations first, so base files and pages override them', () => {
+    const pkg = {
+      en: { ws: { lost: 'Connection lost', back: 'Connection restored' } },
+      de: { ws: { lost: 'Verbindung unterbrochen', back: 'Verbindung wiederhergestellt' } },
+      pl: { ws: { lost: 'Utracono połączenie' } },
+    }
+    const out = mergeMessages(
+      { en: { ws: { back: 'Back online' } }, de: {} },
+      [{ de: { ws: { lost: 'Offline' } } }],
+      { packages: [pkg] },
+    )
+    expect(out).toEqual({
+      en: { ws: { lost: 'Connection lost', back: 'Back online' } },
+      de: { ws: { lost: 'Offline', back: 'Verbindung wiederhergestellt' } },
+    })
+    expect(pkg.de.ws.lost).toBe('Verbindung unterbrochen')
+  })
+
+  it('merges several packages in order, later ones winning', () => {
+    const out = mergeMessages({ en: {} }, [], { packages: [{ en: { a: '1', b: '1' } }, { en: { b: '2' } }, null as any] })
+    expect(out).toEqual({ en: { a: '1', b: '2' } })
+  })
+
+  it('an empty packages list changes nothing', () => {
+    const locales = { en: { a: '1' } }
+    expect(JSON.stringify(mergeMessages(locales, [], { packages: [] }))).toBe(JSON.stringify(mergeMessages(locales, [])))
+  })
 })
 
 describe('deepMerge', () => {

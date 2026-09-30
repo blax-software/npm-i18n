@@ -1,6 +1,7 @@
 export { TranslationMissing } from './types'
 export type { TranslationMissingType, TranslationFile, Messages, LocaleMessages } from './types'
 export { mergeMessages, deepMerge, isPlainObject } from './merge'
+export type { MergeOptions } from './merge'
 export { fallbackChain } from './fallback'
 export type { FallbackChain } from './fallback'
 export { createLazyLoaders } from './lazy'

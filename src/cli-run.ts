@@ -5,8 +5,8 @@ import { checkSourceTree, writeMessages } from './node'
 const USAGE = `blax-i18n — build and check per-page translation sources
 
 Usage:
-  blax-i18n build [--src i18n] [--out <src>/.messages] [--locales en,de,pl] [--default en]
-  blax-i18n check [--src i18n] [--locales en,de,pl] [--default en] [--json]
+  blax-i18n build [--src i18n] [--out <src>/.messages] [--locales en,de,pl] [--default en] [--packages auto|a,b]
+  blax-i18n check [--src i18n] [--locales en,de,pl] [--default en] [--packages auto|a,b] [--json]
 
 build   Merge <src>/locales/*.ts + <src>/pages/**/*.ts into one ESM module per
         locale at <out>/<locale>.js. --default is always emitted.
@@ -14,6 +14,12 @@ check   Report keys missing in any locale and values still marked '[missing]'.
         Exit code 1 when anything is missing. With --default the reference key
         set is that locale's (extra keys elsewhere are listed, not counted);
         without it, the union of all locales' keys.
+
+--packages  Merge translations npm packages register through the "blax-i18n"
+            field of their package.json, under the app's own. "auto" takes
+            every dependency that declares it; otherwise a comma list of names.
+            check then also verifies each package key in every locale.
+--root      Directory of the app's package.json (default: nearest above --src).
 `
 
 export interface CliIo {
@@ -40,6 +46,8 @@ export function runCli(argv: string[], io: CliIo = { log: console.log, error: co
         out: { type: 'string' },
         locales: { type: 'string' },
         default: { type: 'string' },
+        packages: { type: 'string' },
+        root: { type: 'string' },
         json: { type: 'boolean', default: false },
       },
       strict: true,
@@ -49,11 +57,14 @@ export function runCli(argv: string[], io: CliIo = { log: console.log, error: co
     io.error(USAGE)
     return 1
   }
-  const v = parsed.values as { src?: string; out?: string; locales?: string; default?: string; json?: boolean }
+  const v = parsed.values as {
+    src?: string; out?: string; locales?: string; default?: string; packages?: string; root?: string; json?: boolean
+  }
+  const packages = v.packages === 'auto' ? 'auto' : splitList(v.packages)
 
   if (command === 'build') {
     const t0 = Date.now()
-    const written = writeMessages({ src: v.src, out: v.out, locales: splitList(v.locales), defaultLocale: v.default })
+    const written = writeMessages({ src: v.src, out: v.out, locales: splitList(v.locales), defaultLocale: v.default, packages, root: v.root })
     if (v.json) {
       io.log(JSON.stringify(written))
     } else {
@@ -64,7 +75,7 @@ export function runCli(argv: string[], io: CliIo = { log: console.log, error: co
   }
 
   if (command === 'check') {
-    const report = checkSourceTree({ src: v.src, locales: splitList(v.locales), reference: v.default })
+    const report = checkSourceTree({ src: v.src, locales: splitList(v.locales), reference: v.default, packages, root: v.root })
     io.log(v.json ? JSON.stringify(report) : formatReport(report))
     return report.ok ? 0 : 1
   }

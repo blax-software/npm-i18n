@@ -4,8 +4,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { transformSync } from 'esbuild'
-import { checkTranslations, type CheckReport, type CheckSource } from './check'
-import { mergeMessages } from './merge'
+import { checkTranslations, walkKeys, type CheckReport, type CheckSource } from './check'
+import { isPlainObject, mergeMessages } from './merge'
 import { TranslationMissing, type LocaleMessages, type Messages, type TranslationFile } from './types'
 
 const SOURCE_EXT = /\.(ts|mts|js|mjs|cjs)$/
@@ -63,6 +63,26 @@ function walkPages(dir: string, rel = ''): string[] {
   return out.sort()
 }
 
+/**
+ * The package.json field an npm package sets to register its translations: a
+ * path, relative to that package.json, to a module whose default export has the
+ * page-module shape (`{ en: {...}, de: {...} }`).
+ *
+ * @example
+ * // node_modules/@blax-software/networking/package.json
+ * { "name": "@blax-software/networking", "blax-i18n": "./dist/i18n.js" }
+ */
+export const PACKAGE_FIELD = 'blax-i18n'
+
+/** Translations one npm package registered through {@link PACKAGE_FIELD}. */
+export interface PackageSource {
+  /** Package name, e.g. `@blax-software/networking`. */
+  name: string
+  /** Label used in reports: `package:<name>`. */
+  file: string
+  data: TranslationFile
+}
+
 export interface SourceTree {
   /** Locale code → base messages from `<src>/locales/<code>.*` (missing file → `{}`). */
   locales: Record<string, Messages>
@@ -70,6 +90,8 @@ export interface SourceTree {
   pages: { file: string; data: TranslationFile }[]
   /** Locale codes that have a base file under `<src>/locales/`. */
   baseLocales: string[]
+  /** Package translations in merge order (empty unless `packages` was given). */
+  packages: PackageSource[]
 }
 
 export interface ReadOptions {
@@ -77,6 +99,72 @@ export interface ReadOptions {
   src?: string
   /** Locales to load; defaults to every base file under `<src>/locales/`. */
   locales?: string[]
+  /**
+   * npm packages whose translations merge under the app's own. `'auto'` takes
+   * every dependency in the app's package.json that declares
+   * {@link PACKAGE_FIELD}; a list names them explicitly (and throws when one is
+   * not installed or declares nothing). Omitted: no package translations.
+   */
+  packages?: 'auto' | string[]
+  /** Directory of the app's package.json; defaults to the nearest one above `src`. */
+  root?: string
+}
+
+function findRoot(start: string): string {
+  let dir = start
+  for (;;) {
+    if (existsSync(join(dir, 'package.json'))) return dir
+    const parent = dirname(dir)
+    if (parent === dir) return start
+    dir = parent
+  }
+}
+
+function findPackageDir(root: string, name: string): string | null {
+  let dir = root
+  for (;;) {
+    const candidate = join(dir, 'node_modules', name)
+    if (existsSync(join(candidate, 'package.json'))) return candidate
+    const parent = dirname(dir)
+    if (parent === dir) return null
+    dir = parent
+  }
+}
+
+const readJson = (file: string): Record<string, any> => JSON.parse(readFileSync(file, 'utf8'))
+
+/** Load the translations the given (or auto-discovered) npm packages register. */
+export function readPackageSources(options: ReadOptions = {}): PackageSource[] {
+  const wanted = options.packages
+  if (!wanted || (Array.isArray(wanted) && !wanted.length)) return []
+  const root = resolve(options.root ?? findRoot(resolve(options.src ?? 'i18n')))
+  const auto = wanted === 'auto'
+
+  let names: string[]
+  if (auto) {
+    const manifest = existsSync(join(root, 'package.json')) ? readJson(join(root, 'package.json')) : {}
+    names = Object.keys({ ...manifest.dependencies, ...manifest.devDependencies }).sort()
+  } else {
+    names = wanted
+  }
+
+  const sources: PackageSource[] = []
+  for (const name of names) {
+    const dir = findPackageDir(root, name)
+    if (!dir) {
+      if (auto) continue
+      throw new Error(`${OWN_PACKAGE}: package "${name}" is not installed (looked in node_modules above ${root})`)
+    }
+    const entry = readJson(join(dir, 'package.json'))[PACKAGE_FIELD]
+    if (typeof entry !== 'string') {
+      if (auto) continue
+      throw new Error(`${OWN_PACKAGE}: package "${name}" does not declare "${PACKAGE_FIELD}" in its package.json`)
+    }
+    const file = resolveSource(resolve(dir, entry))
+    if (!file) throw new Error(`${OWN_PACKAGE}: "${name}" declares ${PACKAGE_FIELD}: "${entry}", but that file does not exist`)
+    sources.push({ name, file: `package:${name}`, data: defaultExport(loadModule(file)) as TranslationFile })
+  }
+  return sources
 }
 
 /** Read `<src>/locales/*` and `<src>/pages/**` from disk. */
@@ -100,7 +188,7 @@ export function readSourceTree(options: ReadOptions = {}): SourceTree {
     data: defaultExport(loadModule(join(pagesDir, file))) as TranslationFile,
   }))
 
-  return { locales, pages, baseLocales }
+  return { locales, pages, baseLocales, packages: readPackageSources(options) }
 }
 
 export interface BuildOptions extends ReadOptions {
@@ -118,10 +206,30 @@ export interface BuiltLocale {
 
 /** Merge the source tree into one message object per locale (nothing written). */
 export function buildMessages(options: BuildOptions = {}): LocaleMessages {
-  const wanted = new Set(options.locales ?? [])
-  if (options.defaultLocale) wanted.add(options.defaultLocale)
-  const tree = readSourceTree({ src: options.src, locales: wanted.size ? [...wanted] : undefined })
-  return mergeMessages(tree.locales, tree.pages.map((p) => p.data))
+  const def = options.defaultLocale
+  // Without `locales`, every base file is emitted, and `defaultLocale` is added
+  // to that set rather than replacing it.
+  const wanted = options.locales?.length ? [...new Set([...options.locales, ...(def ? [def] : [])])] : undefined
+  const tree = readSourceTree({ ...options, locales: wanted })
+  if (def && !(def in tree.locales)) tree.locales[def] = {}
+  return mergeTree(tree)
+}
+
+function mergeTree(tree: SourceTree): LocaleMessages {
+  return mergeMessages(tree.locales, tree.pages.map((p) => p.data), { packages: tree.packages.map((p) => p.data) })
+}
+
+/** The part of `tree` whose dotted leaf path is in `keys`. */
+function pickKeys(tree: Messages, keys: Set<string>): Messages {
+  const out: Messages = {}
+  for (const [path, value] of walkKeys(tree)) {
+    if (!keys.has(path)) continue
+    const parts = path.split('.')
+    let node = out
+    for (const part of parts.slice(0, -1)) node = node[part] ??= {}
+    node[parts[parts.length - 1]] = value
+  }
+  return out
 }
 
 /** Build and write `<out>/<locale>.js`, one `export default {...}` ESM module per locale. */
@@ -145,7 +253,13 @@ export interface CheckSourceOptions extends ReadOptions {
   reference?: string
 }
 
-/** Read the tree and run `checkTranslations` over the base files and every page. */
+/**
+ * Read the tree and run `checkTranslations` over the base files and every page.
+ *
+ * Package translations are checked against the MERGED messages: a package key
+ * counts as present in a locale when the package ships it or the app supplies
+ * it (base file or page), so an app can fill a locale a package does not ship.
+ */
 export function checkSourceTree(options: CheckSourceOptions = {}): CheckReport {
   const tree = readSourceTree(options)
   const locales = options.locales?.length ? options.locales : tree.baseLocales
@@ -153,5 +267,33 @@ export function checkSourceTree(options: CheckSourceOptions = {}): CheckReport {
     { file: 'locales/*', data: tree.locales },
     ...tree.pages,
   ]
-  return checkTranslations(sources, { locales, reference: options.reference })
+  if (!tree.packages.length) return checkTranslations(sources, { locales, reference: options.reference })
+
+  const merged = mergeTree(tree)
+  // locale → keys some package ships for it. An app page that overrides a
+  // package string in one locale is not "missing" it in the others.
+  const shipped: Record<string, Set<string>> = {}
+  for (const locale of locales) shipped[locale] = new Set()
+  for (const pkg of tree.packages) {
+    const keys = new Set<string>()
+    for (const [locale, slice] of Object.entries(pkg.data ?? {})) {
+      if (!isPlainObject(slice)) continue
+      for (const key of walkKeys(slice).keys()) {
+        keys.add(key)
+        shipped[locale]?.add(key)
+      }
+    }
+    const data: TranslationFile = {}
+    for (const locale of locales) data[locale] = pickKeys(merged[locale] ?? {}, keys)
+    sources.push({ file: pkg.file, data })
+  }
+
+  const report = checkTranslations(sources, { locales, reference: options.reference })
+  let problems = 0
+  for (const locale of locales) {
+    const r = report.locales[locale]
+    r.missing = r.missing.filter((p) => p.file.startsWith('package:') || !shipped[locale].has(p.key))
+    problems += r.missing.length + r.markers.length
+  }
+  return { ...report, ok: problems === 0, problems }
 }

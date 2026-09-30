@@ -1,8 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { buildMessages, checkSourceTree, readSourceTree, writeMessages } from '../src/node'
+import { buildMessages, checkSourceTree, readPackageSources, readSourceTree, writeMessages } from '../src/node'
 import { runCli } from '../src/cli-run'
 
 const SRC = join(__dirname, 'fixtures/i18n')
@@ -55,6 +55,11 @@ describe('buildMessages / writeMessages', () => {
     expect(Object.keys(buildMessages({ src: SRC, locales: ['de'], defaultLocale: 'en' }))).toEqual(['de', 'en'])
   })
 
+  it('a default locale without `locales` adds to the base locales instead of replacing them', () => {
+    expect(Object.keys(buildMessages({ src: SRC, defaultLocale: 'en' }))).toEqual(['de', 'en', 'pl'])
+    expect(Object.keys(buildMessages({ src: SRC, defaultLocale: 'fr' }))).toEqual(['de', 'en', 'pl', 'fr'])
+  })
+
   it('writes one ESM module per locale', async () => {
     const out = mkOut()
     const written = writeMessages({ src: SRC, out, locales: ['en', 'de'] })
@@ -85,6 +90,88 @@ describe('checkSourceTree', () => {
 
   it('passes when only complete locales are checked', () => {
     expect(checkSourceTree({ src: SRC, locales: ['en'] }).ok).toBe(true)
+  })
+})
+
+// A throwaway app on disk: its own i18n/ tree plus node_modules with one
+// package that registers translations and one that does not. Built per test
+// (node_modules/ is gitignored, so it cannot live under test/fixtures).
+function mkApp() {
+  const root = mkOut()
+  const write = (rel: string, body: string) => {
+    mkdirSync(dirname(join(root, rel)), { recursive: true })
+    writeFileSync(join(root, rel), body)
+  }
+  write('package.json', JSON.stringify({ name: 'app', dependencies: { '@acme/widgets': '1.0.0', 'plain-dep': '1.0.0' } }))
+  write('node_modules/@acme/widgets/package.json', JSON.stringify({ name: '@acme/widgets', 'blax-i18n': './dist/i18n.js' }))
+  write('node_modules/@acme/widgets/dist/i18n.js', `export default {
+    en: { widgets: { close: 'Close', open: 'Open' } },
+    de: { widgets: { close: 'Schließen', open: 'Öffnen' } },
+  }\n`)
+  write('node_modules/plain-dep/package.json', JSON.stringify({ name: 'plain-dep' }))
+  write('i18n/locales/en.ts', `export default { common: { save: 'Save' } }\n`)
+  write('i18n/locales/de.ts', `export default { common: { save: 'Speichern' } }\n`)
+  write('i18n/locales/pl.ts', `export default { common: { save: 'Zapisz' } }\n`)
+  // The app renames one English string and fills Polish, which the package lacks.
+  write('i18n/pages/widgets.ts', `export default {
+    en: { widgets: { close: 'Dismiss' } },
+    pl: { widgets: { close: 'Zamknij' } },
+  }\n`)
+  return { root, src: join(root, 'i18n') }
+}
+
+describe('package translations', () => {
+  it('auto-discovers dependencies that declare "blax-i18n"', () => {
+    const { src } = mkApp()
+    const sources = readPackageSources({ src, packages: 'auto' })
+    expect(sources.map((s) => [s.name, s.file])).toEqual([['@acme/widgets', 'package:@acme/widgets']])
+    expect(sources[0].data.de.widgets.open).toBe('Öffnen')
+  })
+
+  it('reads nothing unless asked', () => {
+    const { src } = mkApp()
+    expect(readSourceTree({ src }).packages).toEqual([])
+    expect(buildMessages({ src }).en.widgets).toEqual({ close: 'Dismiss' })
+  })
+
+  it('merges package strings under the app, which overrides them', () => {
+    const { src } = mkApp()
+    const messages = buildMessages({ src, packages: ['@acme/widgets'] })
+    expect(messages.en.widgets).toEqual({ close: 'Dismiss', open: 'Open' })
+    expect(messages.de.widgets).toEqual({ close: 'Schließen', open: 'Öffnen' })
+    expect(messages.pl.widgets).toEqual({ close: 'Zamknij' })
+  })
+
+  it('an explicitly named package must exist and declare translations', () => {
+    const { src } = mkApp()
+    expect(() => readPackageSources({ src, packages: ['@acme/nope'] })).toThrow(/not installed/)
+    expect(() => readPackageSources({ src, packages: ['plain-dep'] })).toThrow(/does not declare "blax-i18n"/)
+  })
+
+  it('check reports a package key no source supplies for a locale', () => {
+    const { src } = mkApp()
+    const report = checkSourceTree({ src, locales: ['en', 'de', 'pl'], reference: 'en', packages: 'auto' })
+    expect(report.ok).toBe(false)
+    expect(report.locales.de.missing).toEqual([])
+    // widgets.close is covered for pl by the app page; widgets.open is not.
+    expect(report.locales.pl.missing).toEqual([{ file: 'package:@acme/widgets', key: 'widgets.open' }])
+  })
+
+  it('check passes once the app fills the gap', () => {
+    const { src } = mkApp()
+    writeFileSync(join(src, 'pages/widgets.ts'), `export default { pl: { widgets: { close: 'Zamknij', open: 'Otwórz' } } }\n`)
+    expect(checkSourceTree({ src, locales: ['en', 'de', 'pl'], reference: 'en', packages: 'auto' }).ok).toBe(true)
+  })
+
+  it('the CLI takes --packages', () => {
+    const { src } = mkApp()
+    const c = capture()
+    expect(runCli(['check', '--src', src, '--locales', 'en,de,pl', '--default', 'en', '--packages', 'auto'], c.io)).toBe(1)
+    expect(c.out.join('\n')).toContain('  package:@acme/widgets  widgets.open  missing')
+
+    const out = mkOut()
+    expect(runCli(['build', '--src', src, '--out', out, '--packages', '@acme/widgets'], capture().io)).toBe(0)
+    expect(readFileSync(join(out, 'de.js'), 'utf8')).toContain('"open":"Öffnen"')
   })
 })
 
