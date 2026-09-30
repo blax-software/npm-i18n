@@ -19,7 +19,7 @@
         }
     },
     "bin": {
-        "blax-i18n": "./dist/cli.js"
+        "blax-i18n": "dist/cli.js"
     },
     "files": [
         "dist",
@@ -55,6 +55,6 @@
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "https://github.com/blax-software/npm-i18n.git"
+        "url": "git+https://github.com/blax-software/npm-i18n.git"
     }
 }
